@@ -9,23 +9,19 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 # ── 런타임 스테이지 ───────────────────────────────────────────────────────────
 FROM python:3.11-slim
 
-# Playwright Chromium 전체 의존성 (playwright install-deps 기준)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
-        libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 \
-        libxfixes3 libxrandr2 libgbm1 libasound2 \
-        libglib2.0-0 libx11-6 libx11-xcb1 libxcb1 \
-        libxext6 libxrender1 libxi6 libxtst6 \
-        fonts-liberation libappindicator3-1 xdg-utils \
-    && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
 
 # 설치된 패키지 복사
 COPY --from=builder /install /usr/local
 
-# Playwright Chromium 브라우저 설치
-RUN playwright install chromium
+# Playwright가 자체적으로 필요한 시스템 패키지를 설치
+# (playwright install-deps가 Debian 버전에 맞게 자동 처리)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        wget curl \
+    && playwright install-deps chromium \
+    && playwright install chromium \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 # 앱 소스 복사
 COPY . .
