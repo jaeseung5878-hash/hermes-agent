@@ -1,27 +1,15 @@
-# ── 빌드 스테이지 ─────────────────────────────────────────────────────────────
-FROM python:3.11-slim AS builder
-
-WORKDIR /build
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
-
-# ── 런타임 스테이지 ───────────────────────────────────────────────────────────
 FROM python:3.11-slim
 
 WORKDIR /app
 
-# 설치된 패키지 복사
-COPY --from=builder /install /usr/local
-
-# Playwright가 자체적으로 필요한 시스템 패키지를 설치
-# (playwright install-deps가 Debian 버전에 맞게 자동 처리)
+# 시스템 패키지
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        wget curl \
-    && playwright install-deps chromium \
-    && playwright install chromium \
-    && apt-get clean \
+        curl \
     && rm -rf /var/lib/apt/lists/*
+
+# Python 패키지 설치
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # 앱 소스 복사
 COPY . .

@@ -8,8 +8,8 @@ uvicorn[standard]>=0.29.0
 slack-bolt>=1.18.0
 slack-sdk>=3.27.0
 
-# 브라우저 자동화 (Claude A2A)
-playwright>=1.44.0
+# 브라우저 자동화 (Claude A2A) — Railway 배포 후 별도 설치
+# playwright>=1.44.0
 
 # HTTP 클라이언트
 httpx>=0.27.0

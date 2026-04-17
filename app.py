@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 
 # ── Slack Bolt 앱 ─────────────────────────────────────────────────────────────
 bolt = AsyncApp(
-    token=os.environ["SLACK_BOT_TOKEN"],
-    signing_secret=os.environ["SLACK_SIGNING_SECRET"],
+    token=os.environ.get("SLACK_BOT_TOKEN", ""),
+    signing_secret=os.environ.get("SLACK_SIGNING_SECRET", ""),
 )
 handler = AsyncSlackRequestHandler(bolt)
 
