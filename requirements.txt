@@ -1,36 +1,28 @@
-# NOTE: This file is maintained for convenience only.
-# The canonical dependency list is in pyproject.toml.
-# Preferred install: pip install -e ".[all]"
+# Hermes Agent — Python 3.11+
 
-# Core dependencies
-openai
-python-dotenv
-fire
-httpx
-rich
-tenacity
-prompt_toolkit
-pyyaml
-requests
-jinja2
-pydantic>=2.0
-PyJWT[crypto]
-debugpy
+# 웹 프레임워크
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
 
-# Web tools
-firecrawl-py
-parallel-web>=0.4.2
+# Slack SDK
+slack-bolt>=1.18.0
+slack-sdk>=3.27.0
 
-# Image generation
-fal-client
+# 브라우저 자동화 (Claude A2A)
+playwright>=1.44.0
 
-# Text-to-speech (Edge TTS is free, no API key needed)
-edge-tts
+# HTTP 클라이언트
+httpx>=0.27.0
+requests>=2.31.0
 
-# Optional: For cron expression parsing (cronjob scheduling)
-croniter
+# 데이터 검증
+pydantic>=2.7.0
 
-# Optional: For messaging platform integrations (gateway)
-python-telegram-bot[webhooks]>=22.6
-discord.py>=2.0
-aiohttp>=3.9.0
+# 유틸리티
+python-dotenv>=1.0.0
+tenacity>=8.3.0
+
+# 테스트
+pytest>=8.2.0
+pytest-asyncio>=0.23.0
+pytest-mock>=3.14.0

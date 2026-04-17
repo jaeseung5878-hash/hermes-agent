@@ -1,46 +1,37 @@
-FROM ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df22866bd7857e5d304b67a564f4feab6ac22044dde719b AS uv_source
-FROM tianon/gosu:1.19-trixie@sha256:3b176695959c71e123eb390d427efc665eeb561b1540e82679c15e992006b8b9 AS gosu_source
-FROM debian:13.4
+# ── 빌드 스테이지 ─────────────────────────────────────────────────────────────
+FROM python:3.11-slim AS builder
 
-# Disable Python stdout buffering to ensure logs are printed immediately
-ENV PYTHONUNBUFFERED=1
+WORKDIR /build
 
-# Store Playwright browsers outside the volume mount so the build-time
-# install survives the /opt/data volume overlay at runtime.
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-# Install system dependencies in one layer, clear APT cache
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        build-essential nodejs npm python3 ripgrep ffmpeg gcc python3-dev libffi-dev procps git && \
-    rm -rf /var/lib/apt/lists/*
+# ── 런타임 스테이지 ───────────────────────────────────────────────────────────
+FROM python:3.11-slim
 
-# Non-root user for runtime; UID can be overridden via HERMES_UID at runtime
-RUN useradd -u 10000 -m -d /opt/data hermes
+# Playwright Chromium 의존성
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
+        libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 \
+        libxfixes3 libxrandr2 libgbm1 libasound2 \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY --chmod=0755 --from=gosu_source /gosu /usr/local/bin/
-COPY --chmod=0755 --from=uv_source /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
+WORKDIR /app
 
-COPY . /opt/hermes
-WORKDIR /opt/hermes
+# 설치된 패키지 복사
+COPY --from=builder /install /usr/local
 
-# Install Node dependencies and Playwright as root (--with-deps needs apt)
-RUN npm install --prefer-offline --no-audit && \
-    npx playwright install --with-deps chromium --only-shell && \
-    cd /opt/hermes/scripts/whatsapp-bridge && \
-    npm install --prefer-offline --no-audit && \
-    npm cache clean --force
+# Playwright Chromium 브라우저 설치
+RUN playwright install chromium
 
-# Hand ownership to hermes user, then install Python deps in a virtualenv
-RUN chown -R hermes:hermes /opt/hermes
-USER hermes
+# 앱 소스 복사
+COPY . .
 
-RUN uv venv && \
-    uv pip install --no-cache-dir -e ".[all]"
+# Railway가 주입하는 PORT 환경변수 사용 (기본 8080)
+ENV PORT=8080 \
+    LOG_LEVEL=INFO \
+    PYTHONUNBUFFERED=1
 
-USER root
-RUN chmod +x /opt/hermes/docker/entrypoint.sh
+EXPOSE 8080
 
-ENV HERMES_HOME=/opt/data
-VOLUME [ "/opt/data" ]
-ENTRYPOINT [ "/opt/hermes/docker/entrypoint.sh" ]
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT}"]
