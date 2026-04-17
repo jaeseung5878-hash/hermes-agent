@@ -128,14 +128,41 @@ def _seed_config_if_missing(home_path: Path) -> Path:
         )
         return config_path
 
-    if _deep_merge_defaults(loaded, _DEFAULTS):
+    changed = _deep_merge_defaults(loaded, _DEFAULTS)
+
+    # Force-override fields we care about regardless of what the file had.
+    # Deep-merge only fills MISSING keys; this block stomps on any stale value
+    # that would break the bot's UX (e.g. reply_in_thread from an old seed).
+    platforms_block = loaded.setdefault("platforms", {})
+    if not isinstance(platforms_block, dict):
+        platforms_block = {}
+        loaded["platforms"] = platforms_block
+    slack_block = platforms_block.setdefault("slack", {})
+    if not isinstance(slack_block, dict):
+        slack_block = {}
+        platforms_block["slack"] = slack_block
+    slack_block["enabled"] = True
+    slack_extra = slack_block.setdefault("extra", {})
+    if not isinstance(slack_extra, dict):
+        slack_extra = {}
+        slack_block["extra"] = slack_extra
+    if slack_extra.get("reply_in_thread") is not False:
+        slack_extra["reply_in_thread"] = False
+        changed = True
+
+    if changed:
         config_path.write_text(
             yaml.safe_dump(loaded, sort_keys=False, allow_unicode=True),
             encoding="utf-8",
         )
-        logging.info("Patched missing defaults into %s", config_path)
-    else:
-        logging.info("Config %s already complete", config_path)
+        logging.info("Patched config.yaml at %s", config_path)
+
+    # Diagnostic: dump the effective Slack platform block so we can verify the
+    # on-disk shape from the deploy logs.
+    logging.info(
+        "Effective platforms.slack = %s",
+        loaded.get("platforms", {}).get("slack"),
+    )
 
     return config_path
 
