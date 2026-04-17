@@ -16,7 +16,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SESSION_FILE = Path.home() / ".hermes" / "claude_a2a_session.json"
+# Railway 볼륨(/data) 우선, 없으면 홈 디렉토리
+_DATA_DIR = Path("/data") if Path("/data").exists() else Path.home() / ".hermes"
+SESSION_FILE = _DATA_DIR / "claude_a2a_session.json"
 _ENV_KEY = "CLAUDE_A2A_COOKIES"
 
 

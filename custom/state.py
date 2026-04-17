@@ -19,7 +19,9 @@ CREDIT_THRESHOLD = 5.1
 CREDIT_CHECK_INTERVAL = 30 * 60  # 30분
 A2A_DAILY_LIMIT = 50
 A2A_WEEKLY_LIMIT = 250
-STATE_FILE = Path.home() / ".hermes" / "custom_router_state.json"
+# Railway 볼륨(/data) 우선, 없으면 홈 디렉토리
+_DATA_DIR = Path("/data") if Path("/data").exists() else Path.home() / ".hermes"
+STATE_FILE = _DATA_DIR / "custom_router_state.json"
 
 
 @dataclass
