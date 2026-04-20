@@ -183,6 +183,11 @@ def _install_router_shim() -> None:
     from custom.router_adapter import install_shim
     install_shim()
 
+    # Fix synthetic thread_id leak in Slack adapter so reply_in_thread=False
+    # actually posts directly into channels for top-level mentions.
+    from custom.slack_patch import install_patch as _install_slack_patch
+    _install_slack_patch()
+
 
 def _preflight_env() -> None:
     """Validate critical env vars. Fail fast with actionable errors."""
