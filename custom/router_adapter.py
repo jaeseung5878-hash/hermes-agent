@@ -109,6 +109,11 @@ def resolve_turn_route(
     if not text:
         return _primary_shape(primary)
 
+    # Diagnostic: log exactly what the classifier receives so we can catch
+    # cases where Hermes wraps the message with history/system prompts.
+    _preview = text if len(text) <= 200 else text[:200] + "…"
+    logger.info("router input (len=%d): %r", len(text), _preview)
+
     try:
         decision: RouteDecision = _smart_route(text)
     except RouterError as e:
