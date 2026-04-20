@@ -228,8 +228,11 @@ class ClaudeA2ABrowser:
 
         # 1) 루트 진입. claude.ai는 세션 쿠키가 유효하면 /chats 또는 /new로
         # 내부 리다이렉트시키는데, 이 경로는 CF challenge_redirect를 덜 튀게 한다.
+        # WHY domcontentloaded (not networkidle): claude.ai는 SPA라 websocket+
+        # 폴링이 상시 돌아 networkidle에 절대 도달하지 못한다. DOM만 뜨면
+        # wait_for_url이 URL 전환을 감지해준다.
         await self._page.goto(
-            CLAUDE_ROOT_URL, wait_until="networkidle", timeout=90_000,
+            CLAUDE_ROOT_URL, wait_until="domcontentloaded", timeout=60_000,
         )
 
         logger.info("루트 진입 후 URL: %s", self._page.url)
@@ -283,7 +286,7 @@ class ClaudeA2ABrowser:
         if "/new" not in self._page.url:
             logger.info("앱 URL 안착 (%s) — /new로 이동", self._page.url)
             await self._page.goto(
-                CLAUDE_URL, wait_until="networkidle", timeout=30_000,
+                CLAUDE_URL, wait_until="domcontentloaded", timeout=30_000,
             )
 
         # 4) composer 선택자 체인은 ask() 쪽에서 _first_visible로 처리.
