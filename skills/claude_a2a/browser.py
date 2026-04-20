@@ -302,24 +302,68 @@ class ClaudeA2ABrowser:
                 f"인식 안 함. 쿠키 누락/storage_state 부재 가능성."
             ) from e
 
-        # 3) 이제 앱 URL — /new 가 아니면 명시적으로 이동. 같은 origin + 세션
-        # 살아있으므로 재챌린지 확률 낮음.
-        if "/new" not in self._page.url:
-            logger.info("앱 URL 안착 (%s) — /new로 이동", self._page.url)
+        post_wait_url = self._page.url
+        logger.info("wait_for_url 통과 후 URL=%s", post_wait_url)
+
+        # 3) 이제 앱 URL — /new 가 아니면 명시적으로 이동.
+        if "/new" not in post_wait_url:
+            logger.info("앱 URL 안착 (%s) — /new로 이동", post_wait_url)
             await self._page.goto(
                 CLAUDE_URL, wait_until="domcontentloaded", timeout=30_000,
             )
+            logger.info("/new goto 완료 후 URL=%s", self._page.url)
 
-        # 4) composer 선택자 체인은 ask() 쪽에서 _first_visible로 처리.
-        # 여기선 최소 하나가 attached 되었는지만 확인 (빠른 fail).
+        # 4) /new 이동 직후 CF 챌린지가 뜰 수 있다 (관측됨: 루트→/new auto-redirect
+        # 가 일어난 경우 wait_for_url는 /new에서 통과했지만, 그 직후 CF가
+        # challenge_redirect로 튕겨냄). URL이 challenge나 /api/면 한 번 더 탈출
+        # 대기 — CF JS 챌린지는 보통 10~60초 내에 스스로 resolve 된다.
+        if "challenge" in self._page.url.lower() or "/api/" in self._page.url.lower():
+            logger.info(
+                "/new 진입 직후 CF 챌린지 감지 (%s) — 최대 60초 탈출 대기",
+                self._page.url,
+            )
+            try:
+                await self._page.wait_for_url(
+                    _is_app_url, timeout=60_000,
+                )
+                logger.info("CF 챌린지 탈출 완료. URL=%s", self._page.url)
+            except Exception as e:
+                await _save_debug_screenshot(self._page, "challenge_after_new")
+                try:
+                    html = await self._page.content()
+                    title = await self._page.title()
+                except Exception:
+                    html = ""
+                    title = "<unavailable>"
+                logger.error(
+                    "CF 챌린지(/new 직후) 탈출 실패. URL=%s title=%r html[:400]=%s",
+                    self._page.url, title, html[:400].replace("\n", " "),
+                )
+                raise A2AError(
+                    f"/new 직후 CF 챌린지 탈출 실패 (60s). URL: {self._page.url}. "
+                    f"localStorage 토큰 부재 가능성 — storage_state 전환 필요."
+                ) from e
+
+        # 5) composer가 DOM에 붙기를 기다린다. /new 하이드레이션에 시간이 걸릴
+        # 수 있으므로 timeout을 넉넉히 둔다.
         try:
             await self._page.wait_for_selector(
-                ", ".join(TYPING_SELECTORS), state="attached", timeout=15_000,
+                ", ".join(TYPING_SELECTORS), state="attached", timeout=45_000,
             )
         except Exception as e:
             await _save_debug_screenshot(self._page, "composer_never_attached")
+            try:
+                html = await self._page.content()
+                title = await self._page.title()
+            except Exception:
+                html = ""
+                title = "<unavailable>"
+            logger.error(
+                "composer attached 실패. URL=%s title=%r html[:400]=%s",
+                self._page.url, title, html[:400].replace("\n", " "),
+            )
             raise A2AError(
-                f"composer가 /new 로드 후에도 DOM에 나타나지 않음. URL: {self._page.url}"
+                f"composer가 DOM에 나타나지 않음. URL: {self._page.url}"
             ) from e
 
     async def _wait_for_response_complete(self) -> None:
