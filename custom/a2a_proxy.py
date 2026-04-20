@@ -37,35 +37,62 @@ PROXY_BASE_URL = f"http://{PROXY_HOST}:{PROXY_PORT}/v1"
 _SEMAPHORE = asyncio.Semaphore(1)
 
 
-def _extract_prompt(messages: List[Dict[str, Any]]) -> str:
-    """Flatten OpenAI-format messages into a single human-readable prompt.
+def _stringify_content(content: Any) -> str:
+    if isinstance(content, list):
+        return " ".join(
+            c.get("text", "")
+            for c in content
+            if isinstance(c, dict) and c.get("type") == "text"
+        ).strip()
+    return str(content or "").strip()
 
-    - ``system`` turns are prefixed with ``[SYSTEM]``
-    - ``assistant`` turns (history) are prefixed with ``[ASSISTANT]``
-    - User turns are emitted as-is
-    - Multi-modal ``content`` arrays keep only text parts
+
+def _extract_prompt(messages: List[Dict[str, Any]]) -> str:
+    """Build a compact prompt for claude.ai from Hermes's OpenAI message array.
+
+    claude.ai's web composer is a browser textbox — a full Hermes payload
+    (system prompt + tool schemas + history) is too long to paste reliably.
+    Strategy:
+      1. Take the last user turn (the actual question) verbatim.
+      2. Prepend the 2-3 most recent assistant turns for short-term context.
+      3. Prepend a brief system hint only if present and short (<400 chars).
+
+    The browser layer (``skills.claude_a2a.browser``) will additionally
+    truncate anything above ``A2A_PROMPT_MAX_CHARS`` as a hard cap.
     """
     if not messages:
         return ""
-    parts: List[str] = []
+
+    user_turns: List[str] = []
+    assistant_turns: List[str] = []
+    system_hint: str = ""
+
     for msg in messages:
         role = msg.get("role", "user")
-        content = msg.get("content", "")
-        if isinstance(content, list):
-            content = " ".join(
-                c.get("text", "")
-                for c in content
-                if isinstance(c, dict) and c.get("type") == "text"
-            )
-        text = str(content).strip()
+        text = _stringify_content(msg.get("content"))
         if not text:
             continue
-        if role == "system":
-            parts.append(f"[SYSTEM]\n{text}")
+        if role == "user":
+            user_turns.append(text)
         elif role == "assistant":
-            parts.append(f"[ASSISTANT]\n{text}")
-        else:
-            parts.append(text)
+            assistant_turns.append(text)
+        elif role == "system" and not system_hint and len(text) < 400:
+            # Only keep very short system prompts; Hermes's tool-use boilerplate
+            # is not useful to claude.ai's web UI.
+            system_hint = text
+
+    if not user_turns:
+        return ""
+
+    last_user = user_turns[-1]
+    recent_assistants = assistant_turns[-2:]
+
+    parts: List[str] = []
+    if system_hint:
+        parts.append(system_hint)
+    for a in recent_assistants:
+        parts.append(f"[이전 답변]\n{a}")
+    parts.append(last_user)
     return "\n\n".join(parts)
 
 
