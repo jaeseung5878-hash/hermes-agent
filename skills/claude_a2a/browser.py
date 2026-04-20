@@ -169,7 +169,11 @@ class ClaudeA2ABrowser:
                 "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
             },
         )
-        await self._context.add_init_script(_STEALTH_INIT_SCRIPT)
+        # WHY no add_init_script: patchright ships with its own stealth patches
+        # at the CDP layer. Injecting our own JS on top (navigator.webdriver
+        # override, WebGL spoof, etc.) re-introduces detection surface because
+        # the DOM-level override is itself a fingerprintable mutation. Per
+        # patchright docs: let the launcher handle it.
         await inject_session(self._context)
         self._page = await self._context.new_page()
         return self
@@ -400,19 +404,23 @@ class ClaudeA2ABrowser:
 
 
 async def run_a2a(prompt: str) -> str:
-    """A2A 세션을 열고 응답을 반환하는 비동기 편의 함수."""
+    """A2A 세션을 열고 응답을 반환하는 비동기 편의 함수.
+
+    Uses ``patchright`` (Playwright fork with CDP-level stealth) instead of
+    stock Playwright. Stock Playwright leaks ``runtime.enable`` + CDP console
+    fingerprints that Cloudflare's bot detection pipes through — patchright
+    removes those leaks at the driver layer. No args= / init_script on top:
+    per patchright docs, layering our own stealth tricks is counter-productive.
+    """
     try:
-        from playwright.async_api import async_playwright
+        from patchright.async_api import async_playwright
     except ImportError as e:
         raise A2AError(
-            "playwright 패키지 미설치. `pip install playwright && playwright install chromium`"
+            "patchright 패키지 미설치. `pip install patchright && patchright install chromium`"
         ) from e
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=_STEALTH_ARGS,
-        )
+        browser = await pw.chromium.launch(headless=True)
         try:
             async with ClaudeA2ABrowser(browser) as client:
                 return await client.ask(prompt)

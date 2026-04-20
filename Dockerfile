@@ -20,14 +20,20 @@ COPY . .
 RUN pip install --no-cache-dir -U pip setuptools wheel \
     && pip install --no-cache-dir -e ".[slack,cron]"
 
-# Playwright runtime for Claude A2A (skills/claude_a2a drives claude.ai).
-# `install-deps` pulls in the shared libs Chromium needs (nss, atk, cups,
-# xkbcommon, x11, composite, randr, gbm, alsa, pango, ...). Chromium itself
-# is fetched by `playwright install chromium`. Kept in a separate layer so
-# non-A2A code changes don't invalidate the ~500 MB chromium download cache.
-RUN pip install --no-cache-dir "playwright>=1.44.0" \
+# Patchright runtime for Claude A2A (skills/claude_a2a drives claude.ai).
+# Patchright is a Playwright fork that removes CDP-layer fingerprints
+# (runtime.enable leak, console.* hook, etc.) which Cloudflare Enterprise
+# uses to detect stock Playwright even with stealth JS patches. We still
+# keep `playwright` installed because scripts/login_a2a.py runs locally
+# headed for interactive session capture and does not need CF bypass.
+#
+# `install-deps` pulls the shared libs Chromium needs (nss, atk, cups,
+# xkbcommon, x11, composite, randr, gbm, alsa, pango, ...). Chromium
+# itself is fetched by `patchright install chromium`. Kept in a separate
+# layer so non-A2A code changes don't invalidate the ~500 MB download cache.
+RUN pip install --no-cache-dir "playwright>=1.44.0" "patchright>=1.44.0" \
     && playwright install-deps chromium \
-    && playwright install chromium
+    && patchright install chromium
 
 ENV PORT=8080 \
     LOG_LEVEL=INFO \
