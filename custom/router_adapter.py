@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any, Dict, Optional
 
 from .router import route as _smart_route, RouteDecision
@@ -23,6 +24,21 @@ logger = logging.getLogger(__name__)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_PROVIDER = "openrouter"
 OPENROUTER_API_MODE = "chat_completions"
+
+# Hermes gateway wraps inbound messages with a "[username] " prefix (and
+# inserts \u200b zero-width spaces into the username to prevent accidental
+# mentions) before handing the text to the per-turn route resolver. Strip
+# that envelope so our classifier regexes (which are anchored at ^) match the
+# actual user question.
+_USERNAME_PREFIX = re.compile(r"^\s*\[[^\]]+\]\s+")
+_ZERO_WIDTH = re.compile(r"[\u200b\u200c\u200d\ufeff]")
+
+
+def _strip_wrapper(text: str) -> str:
+    """Remove Hermes's ``[username] `` prefix and any zero-width padding."""
+    cleaned = _USERNAME_PREFIX.sub("", text, count=1)
+    cleaned = _ZERO_WIDTH.sub("", cleaned)
+    return cleaned.strip()
 
 
 def _coerce_primary_runtime(primary: Dict[str, Any]) -> Dict[str, Any]:
@@ -105,14 +121,13 @@ def resolve_turn_route(
     - Returns the dict shape Hermes gateway expects: ``model``, ``runtime``,
       ``label``, ``signature``.
     """
-    text = (user_message or "").strip()
-    if not text:
+    raw = (user_message or "").strip()
+    if not raw:
         return _primary_shape(primary)
 
-    # Diagnostic: log exactly what the classifier receives so we can catch
-    # cases where Hermes wraps the message with history/system prompts.
-    _preview = text if len(text) <= 200 else text[:200] + "…"
-    logger.info("router input (len=%d): %r", len(text), _preview)
+    text = _strip_wrapper(raw)
+    if not text:
+        return _primary_shape(primary)
 
     try:
         decision: RouteDecision = _smart_route(text)
