@@ -235,10 +235,17 @@ class ClaudeA2ABrowser:
             CLAUDE_ROOT_URL, wait_until="domcontentloaded", timeout=60_000,
         )
 
-        logger.info("루트 진입 후 URL: %s", self._page.url)
+        try:
+            root_title = await self._page.title()
+        except Exception:
+            root_title = "<unavailable>"
+        logger.info("루트 진입 후 URL=%s title=%r", self._page.url, root_title)
 
-        # 2) challenge/login 이 아닌 URL까지 대기. CF Turnstile이 알아서 통과
-        # 시키면 URL이 바뀐다. predicate가 True가 되는 순간 리턴.
+        # 2) 로그인된 앱 URL까지 대기. 세션 쿠키가 유효하면 claude.ai는 SPA가
+        # 하이드레이션 직후 `/chats` 또는 `/new`로 JS 리다이렉트시킨다. 루트
+        # `/` 그 자체는 landing page이므로 앱 URL이 아님 — 거기 머물러 있다는
+        # 건 세션이 활성화 안 된 것. predicate는 `/chats`, `/new`, `/project`,
+        # `/recents` 같은 authenticated 경로만 True로 본다.
         def _is_app_url(url: str) -> bool:
             lower = url.lower()
             if "/login" in lower:
@@ -247,6 +254,9 @@ class ClaudeA2ABrowser:
                 return False
             if "/api/" in lower:
                 return False
+            # 루트 정확 일치(선행 + trailing slash 무관)는 landing page.
+            if lower.rstrip("/") in ("https://claude.ai", "http://claude.ai"):
+                return False
             return lower.startswith("https://claude.ai/")
 
         try:
@@ -254,31 +264,42 @@ class ClaudeA2ABrowser:
                 _is_app_url, timeout=COMPOSER_WAIT_MS,
             )
         except Exception as e:
-            # 현재 페이지가 /login이면 쿠키 문제로 간주.
             current = self._page.url
-            if "/login" in current.lower():
-                await _save_debug_screenshot(self._page, "login_redirect")
-                raise A2AError(
-                    f"/login으로 리다이렉트됨 ({current}) — 쿠키 만료/무효. "
-                    "scripts/login_a2a.py로 재로그인 후 CLAUDE_A2A_COOKIES 갱신하세요."
-                ) from e
-            # 아니면 CF 챌린지에 막힌 것. 페이지 내용 스니펫을 로그로 남겨
-            # 원격 진단 가능하도록 한다.
-            await _save_debug_screenshot(self._page, "challenge_stuck")
+            lower = current.lower()
+
+            # 진단용: 페이지 상태 캡처.
+            await _save_debug_screenshot(self._page, "app_redirect_stuck")
             try:
                 html = await self._page.content()
                 title = await self._page.title()
             except Exception:
                 html = ""
                 title = "<unavailable>"
+
+            if "/login" in lower:
+                raise A2AError(
+                    f"/login으로 리다이렉트됨 ({current}) — 쿠키 만료/무효. "
+                    "scripts/login_a2a.py로 재로그인 후 CLAUDE_A2A_COOKIES 갱신하세요."
+                ) from e
+            if "challenge" in lower:
+                logger.error(
+                    "CF 챌린지 페이지에서 탈출 못함. URL=%s title=%r html[:400]=%s",
+                    current, title, html[:400].replace("\n", " "),
+                )
+                raise A2AError(
+                    f"{COMPOSER_WAIT_MS/1000:.0f}초 내에 CF 챌린지 탈출 실패. "
+                    f"URL: {current}. Railway IP 플래그/headless fingerprint 감지."
+                ) from e
+            # 루트에 머물러 있으면 세션 하이드레이션 실패 — 쿠키는 주입됐지만
+            # 앱이 "로그인됨"으로 인식 안 한 상태.
             logger.error(
-                "Cloudflare 챌린지 탈출 실패. URL=%s title=%r html[:400]=%s",
+                "루트에서 앱으로 auto-redirect 실패. URL=%s title=%r html[:400]=%s",
                 current, title, html[:400].replace("\n", " "),
             )
             raise A2AError(
-                f"{COMPOSER_WAIT_MS/1000:.0f}초 내에 CF 챌린지 탈출 실패. "
-                f"URL: {current}. Railway IP가 CF에 플래그됐거나 headless "
-                f"fingerprint 감지됐을 가능성. 디버그 스크린샷을 /data에서 확인."
+                f"세션 하이드레이션 실패. 루트({current})에 머물러 있고 SPA가 "
+                f"/chats로 리다이렉트 안 함. 쿠키는 주입됐지만 앱이 로그인 상태로 "
+                f"인식 안 함. 쿠키 누락/storage_state 부재 가능성."
             ) from e
 
         # 3) 이제 앱 URL — /new 가 아니면 명시적으로 이동. 같은 origin + 세션
