@@ -20,9 +20,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+CLAUDE_ROOT_URL = "https://claude.ai/"
 CLAUDE_URL = "https://claude.ai/new"
 RESPONSE_TIMEOUT_MS = 180_000  # 3분 (긴 응답/웹검색 대비)
-COMPOSER_WAIT_MS = 60_000      # 1분 (Cloudflare 챌린지 통과 시간 포함)
+COMPOSER_WAIT_MS = 120_000     # 2분 (Cloudflare Turnstile이 90초 이상 걸리기도 함)
 
 # claude.ai의 DOM은 자주 바뀌므로 fallback 체인으로 시도한다.
 # 가장 안정적인 것은 contenteditable + role=textbox 조합.
@@ -62,13 +63,15 @@ _DEBUG_DIR = Path("/data") if Path("/data").exists() else Path.home() / ".hermes
 _PROMPT_MAX_CHARS = int(os.environ.get("A2A_PROMPT_MAX_CHARS", "8000"))
 
 # Chromium launch 인자 — 자동화 감지 플래그 비활성화.
+# WHY no --disable-gpu: STEALTH_INIT_SCRIPT의 WebGL vendor 스푸핑이 동작하려면
+# GPU 파이프라인이 살아있어야 함. 끄면 fingerprint가 'SwiftShader'로 잡혀
+# Cloudflare JS 챌린지에서 headless로 분류됨.
 _STEALTH_ARGS: List[str] = [
     "--disable-blink-features=AutomationControlled",
     "--disable-features=IsolateOrigins,site-per-process",
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-dev-shm-usage",
-    "--disable-gpu",
 ]
 
 # navigator.webdriver, permissions API, chrome object 등을 패치해서 headless 티를
@@ -210,38 +213,90 @@ class ClaudeA2ABrowser:
         return response
 
     async def _navigate_to_composer(self) -> None:
-        """claude.ai/new로 이동하고 Cloudflare 챌린지가 풀릴 때까지 대기."""
+        """claude.ai 세션 확보 → composer 도달.
+
+        전략:
+          1) `/new` 직행은 CF가 high-risk endpoint로 간주해 challenge_redirect
+             를 걸 확률이 높다. 루트 `/` 로 먼저 진입해 세션 쿠키가 passive
+             challenge를 통과하게 한다.
+          2) `wait_until="networkidle"` 로 CF Turnstile JS가 끝나길 기다린다.
+          3) `wait_for_url` predicate로 challenge/login 이 아닌 앱 URL에 안착
+             할 때까지 폴링 없이 대기.
+          4) 안착 후 composer 선택자 체인 탐색.
+        """
         assert self._page is not None
 
-        # domcontentloaded 대신 networkidle — 챌린지 스크립트가 모두 끝날 때까지.
-        await self._page.goto(CLAUDE_URL, wait_until="domcontentloaded", timeout=60_000)
-
-        # challenge_redirect URL에 있으면 실제 앱 URL로 전환될 때까지 대기.
-        deadline = asyncio.get_running_loop().time() + (COMPOSER_WAIT_MS / 1000)
-        while asyncio.get_running_loop().time() < deadline:
-            current = self._page.url
-            if "challenge" in current or "/api/" in current:
-                logger.info("챌린지 페이지 감지: %s — 대기 중", current)
-                await asyncio.sleep(2)
-                continue
-            if "/login" in current:
-                raise A2AError(
-                    f"/login으로 리다이렉트됨 ({current}) — 쿠키가 만료됐거나 잘못됨. "
-                    "Cookie-Editor로 claude.ai 쿠키 다시 내보내주세요."
-                )
-            # 정상 URL로 안착 → composer 나타날 때까지 기다림
-            try:
-                await self._page.wait_for_selector(
-                    ", ".join(TYPING_SELECTORS), timeout=5_000,
-                )
-                return
-            except Exception:
-                await asyncio.sleep(1)
-
-        raise A2AError(
-            f"{COMPOSER_WAIT_MS/1000:.0f}초 내에 composer 도달 실패. "
-            f"마지막 URL: {self._page.url}"
+        # 1) 루트 진입. claude.ai는 세션 쿠키가 유효하면 /chats 또는 /new로
+        # 내부 리다이렉트시키는데, 이 경로는 CF challenge_redirect를 덜 튀게 한다.
+        await self._page.goto(
+            CLAUDE_ROOT_URL, wait_until="networkidle", timeout=90_000,
         )
+
+        logger.info("루트 진입 후 URL: %s", self._page.url)
+
+        # 2) challenge/login 이 아닌 URL까지 대기. CF Turnstile이 알아서 통과
+        # 시키면 URL이 바뀐다. predicate가 True가 되는 순간 리턴.
+        def _is_app_url(url: str) -> bool:
+            lower = url.lower()
+            if "/login" in lower:
+                return False
+            if "challenge" in lower:
+                return False
+            if "/api/" in lower:
+                return False
+            return lower.startswith("https://claude.ai/")
+
+        try:
+            await self._page.wait_for_url(
+                _is_app_url, timeout=COMPOSER_WAIT_MS,
+            )
+        except Exception as e:
+            # 현재 페이지가 /login이면 쿠키 문제로 간주.
+            current = self._page.url
+            if "/login" in current.lower():
+                await _save_debug_screenshot(self._page, "login_redirect")
+                raise A2AError(
+                    f"/login으로 리다이렉트됨 ({current}) — 쿠키 만료/무효. "
+                    "scripts/login_a2a.py로 재로그인 후 CLAUDE_A2A_COOKIES 갱신하세요."
+                ) from e
+            # 아니면 CF 챌린지에 막힌 것. 페이지 내용 스니펫을 로그로 남겨
+            # 원격 진단 가능하도록 한다.
+            await _save_debug_screenshot(self._page, "challenge_stuck")
+            try:
+                html = await self._page.content()
+                title = await self._page.title()
+            except Exception:
+                html = ""
+                title = "<unavailable>"
+            logger.error(
+                "Cloudflare 챌린지 탈출 실패. URL=%s title=%r html[:400]=%s",
+                current, title, html[:400].replace("\n", " "),
+            )
+            raise A2AError(
+                f"{COMPOSER_WAIT_MS/1000:.0f}초 내에 CF 챌린지 탈출 실패. "
+                f"URL: {current}. Railway IP가 CF에 플래그됐거나 headless "
+                f"fingerprint 감지됐을 가능성. 디버그 스크린샷을 /data에서 확인."
+            ) from e
+
+        # 3) 이제 앱 URL — /new 가 아니면 명시적으로 이동. 같은 origin + 세션
+        # 살아있으므로 재챌린지 확률 낮음.
+        if "/new" not in self._page.url:
+            logger.info("앱 URL 안착 (%s) — /new로 이동", self._page.url)
+            await self._page.goto(
+                CLAUDE_URL, wait_until="networkidle", timeout=30_000,
+            )
+
+        # 4) composer 선택자 체인은 ask() 쪽에서 _first_visible로 처리.
+        # 여기선 최소 하나가 attached 되었는지만 확인 (빠른 fail).
+        try:
+            await self._page.wait_for_selector(
+                ", ".join(TYPING_SELECTORS), state="attached", timeout=15_000,
+            )
+        except Exception as e:
+            await _save_debug_screenshot(self._page, "composer_never_attached")
+            raise A2AError(
+                f"composer가 /new 로드 후에도 DOM에 나타나지 않음. URL: {self._page.url}"
+            ) from e
 
     async def _wait_for_response_complete(self) -> None:
         """Stop 버튼 등장→소멸로 스트리밍 완료를 감지. 실패해도 계속 진행."""
