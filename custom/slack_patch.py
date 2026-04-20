@@ -42,6 +42,7 @@ def _patched_resolve_thread_ts(
     """
     meta = metadata or {}
     metadata_thread_id = meta.get("thread_id") or meta.get("thread_ts")
+    reply_in_thread_enabled = self.config.extra.get("reply_in_thread", True)
 
     # A thread_id that equals the originating message's own ts is a synthetic
     # session key, not a real thread root. Discard it when we're told not to
@@ -52,9 +53,21 @@ def _patched_resolve_thread_ts(
         and metadata_thread_id == reply_to
     )
 
-    if not self.config.extra.get("reply_in_thread", True):
+    logger.info(
+        "_resolve_thread_ts called: reply_in_thread=%s reply_to=%r "
+        "meta_thread_id=%r is_synthetic=%s metadata_keys=%s",
+        reply_in_thread_enabled,
+        reply_to,
+        metadata_thread_id,
+        is_synthetic,
+        list(meta.keys()),
+    )
+
+    if not reply_in_thread_enabled:
         if metadata_thread_id and not is_synthetic:
+            logger.info("_resolve_thread_ts → REAL thread %r", metadata_thread_id)
             return metadata_thread_id
+        logger.info("_resolve_thread_ts → channel reply (None)")
         return None
 
     # reply_in_thread=True — upstream default behaviour.
