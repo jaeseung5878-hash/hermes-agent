@@ -20,6 +20,15 @@ COPY . .
 RUN pip install --no-cache-dir -U pip setuptools wheel \
     && pip install --no-cache-dir -e ".[slack,cron]"
 
+# Playwright runtime for Claude A2A (skills/claude_a2a drives claude.ai).
+# `install-deps` pulls in the shared libs Chromium needs (nss, atk, cups,
+# xkbcommon, x11, composite, randr, gbm, alsa, pango, ...). Chromium itself
+# is fetched by `playwright install chromium`. Kept in a separate layer so
+# non-A2A code changes don't invalidate the ~500 MB chromium download cache.
+RUN pip install --no-cache-dir "playwright>=1.44.0" \
+    && playwright install-deps chromium \
+    && playwright install chromium
+
 ENV PORT=8080 \
     LOG_LEVEL=INFO \
     PYTHONUNBUFFERED=1 \
@@ -30,6 +39,7 @@ ENV PORT=8080 \
 EXPOSE 8080
 
 # Hermes gateway uses Slack Socket Mode (outbound WebSocket) — no HTTP
-# listener required. The entrypoint seeds config.yaml on first boot,
-# installs the Smart Router shim, then launches the gateway.
+# listener required for ingress. The entrypoint seeds config.yaml on first
+# boot, installs the Smart Router + Slack patches, starts the local A2A
+# OpenAI-compatible proxy (127.0.0.1:8888), then launches the gateway.
 CMD ["python", "-m", "custom.entry"]

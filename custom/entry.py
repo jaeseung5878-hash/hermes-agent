@@ -206,12 +206,26 @@ def _preflight_env() -> None:
 
 
 async def _run_gateway() -> None:
-    """Import and run the Hermes gateway."""
+    """Boot the A2A proxy, then run the Hermes gateway."""
     from gateway.config import load_gateway_config
     from gateway.run import start_gateway
+    from custom.a2a_proxy import start_proxy
 
-    config = load_gateway_config()
-    await start_gateway(config)
+    # Start the A2A OpenAI-compatible proxy first so routing decisions targeting
+    # CLAUDE_A2A can reach it from the moment gateway begins dispatching.
+    proxy_runner = await start_proxy()
+    if proxy_runner is None:
+        logging.warning(
+            "A2A proxy did not start — CLAUDE_A2A routes will fail. "
+            "This is usually a port conflict on 127.0.0.1:8888."
+        )
+
+    try:
+        config = load_gateway_config()
+        await start_gateway(config)
+    finally:
+        if proxy_runner is not None:
+            await proxy_runner.cleanup()
 
 
 def main() -> int:

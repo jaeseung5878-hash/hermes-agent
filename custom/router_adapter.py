@@ -70,28 +70,6 @@ def _primary_shape(primary: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _substitute_a2a_model(decision: RouteDecision) -> str:
-    """Translate A2A pseudo-model to a Hermes-callable OpenRouter model.
-
-    Claude A2A is a Playwright-driven pseudo-model; Hermes's gateway calls LLMs
-    via HTTP, so we cannot hand it ``claude-a2a`` as a model ID. Until A2A is
-    wired into the Hermes pipeline (Phase 5+), substitute GPT-5.4 and flag the
-    decision so logs reflect the fallback.
-    """
-    logger.warning(
-        "A2A route selected but A2A dispatch not yet integrated into Hermes; "
-        "substituting %s → %s (reason=%s)",
-        decision.model_used,
-        GPT_5_4.id,
-        decision.route_reason,
-    )
-    decision.model_used = GPT_5_4.id
-    decision.route_reason = f"a2a_not_yet_integrated_gpt_fallback:{decision.route_reason}"
-    decision.fallback_used = True
-    decision.a2a_used = False
-    return GPT_5_4.id
-
-
 def _openrouter_runtime() -> Dict[str, Any]:
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
     if not api_key:
@@ -107,6 +85,42 @@ def _openrouter_runtime() -> Dict[str, Any]:
         "args": [],
         "credential_pool": None,
     }
+
+
+def _a2a_runtime() -> Dict[str, Any]:
+    """Route Claude A2A through the local OpenAI-compatible proxy.
+
+    ``custom.a2a_proxy`` exposes /v1/chat/completions on 127.0.0.1:8888 and
+    translates OpenAI-format requests into Playwright calls against claude.ai.
+    Hermes treats it like any custom OpenAI endpoint — no special-casing needed
+    in the agent pipeline.
+    """
+    from .a2a_proxy import PROXY_BASE_URL
+    return {
+        # Proxy ignores this but Hermes may require a non-empty key.
+        "api_key": "a2a-local-proxy",
+        "base_url": PROXY_BASE_URL,
+        "provider": "custom",
+        "api_mode": OPENROUTER_API_MODE,  # chat_completions
+        "command": None,
+        "args": [],
+        "credential_pool": None,
+    }
+
+
+def _a2a_session_ready() -> bool:
+    """Check whether claude.ai cookies are loadable.
+
+    If no session is configured, we fall back to GPT-5.4 rather than let the
+    proxy surface a 502. Keeps the UX sane for users who haven't run
+    ``scripts/login_a2a.py`` yet.
+    """
+    try:
+        from skills.claude_a2a.session import session_exists
+        return bool(session_exists())
+    except Exception as e:
+        logger.warning("A2A session probe failed (%s); assuming unavailable", e)
+        return False
 
 
 def resolve_turn_route(
@@ -139,14 +153,35 @@ def resolve_turn_route(
         return _primary_shape(primary)
 
     if decision.model_used == CLAUDE_A2A.id:
-        _substitute_a2a_model(decision)
-
-    runtime = _openrouter_runtime()
-
-    label = (
-        f"smart-router[{decision.category}/score={decision.score}"
-        f"/reason={decision.route_reason}] → {decision.model_used}"
-    )
+        if _a2a_session_ready():
+            runtime = _a2a_runtime()
+            label = (
+                f"smart-router[{decision.category}/claude-a2a/"
+                f"reason={decision.route_reason}] → browser automation"
+            )
+        else:
+            # No cookies configured — gracefully degrade to GPT-5.4 instead of
+            # handing Hermes a proxy that will 502 on every request.
+            logger.warning(
+                "CLAUDE_A2A routed but no A2A session found; falling back to %s. "
+                "Run scripts/login_a2a.py and set CLAUDE_A2A_COOKIES to enable.",
+                GPT_5_4.id,
+            )
+            decision.model_used = GPT_5_4.id
+            decision.route_reason = f"a2a_no_session_gpt_fallback:{decision.route_reason}"
+            decision.fallback_used = True
+            decision.a2a_used = False
+            runtime = _openrouter_runtime()
+            label = (
+                f"smart-router[{decision.category}/a2a→gpt-fallback"
+                f"/score={decision.score}] → {decision.model_used}"
+            )
+    else:
+        runtime = _openrouter_runtime()
+        label = (
+            f"smart-router[{decision.category}/score={decision.score}"
+            f"/reason={decision.route_reason}] → {decision.model_used}"
+        )
 
     return {
         "model": decision.model_used,
