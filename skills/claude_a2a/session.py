@@ -2,6 +2,15 @@
 Claude A2A 세션 관리
 우선순위: 환경변수 CLAUDE_A2A_COOKIES (base64 JSON) → 로컬 파일
 Railway 같은 ephemeral 환경에서는 환경변수를 사용한다.
+
+쿠키 JSON 포맷은 다음을 모두 허용한다 (자동 변환):
+- Playwright 네이티브 (name/value/domain/expires/sameSite: Lax)
+- Cookie-Editor / EditThisCookie Chrome 확장 내보내기 (expirationDate,
+  hostOnly, session, storeId 같은 여분 필드 + sameSite: lax 소문자)
+- {"cookies": [...]} 래핑 형태
+
+덕분에 사용자는 브라우저 확장으로 내보낸 JSON을 그대로 base64 인코딩해서
+Railway에 붙여넣을 수 있다.
 """
 from __future__ import annotations
 import base64
@@ -9,7 +18,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Iterable, List
 
 if TYPE_CHECKING:
     from playwright.async_api import BrowserContext
@@ -26,18 +35,109 @@ class A2AError(Exception):
     """Claude A2A 브라우저 자동화 실패."""
 
 
+# ── 쿠키 정규화 ──────────────────────────────────────────────────────────────
+
+_SAME_SITE_MAP = {
+    "lax": "Lax",
+    "strict": "Strict",
+    "none": "None",
+    "no_restriction": "None",
+    "unspecified": "Lax",
+}
+
+_PLAYWRIGHT_ALLOWED_KEYS = {
+    "name", "value", "domain", "path", "expires", "httpOnly", "secure", "sameSite",
+}
+
+
+def _normalize_cookie(raw: dict) -> dict | None:
+    """Convert an arbitrary browser-extension cookie dict into Playwright shape.
+
+    Returns ``None`` if the cookie is unusable (missing name or value).
+    """
+    name = raw.get("name")
+    value = raw.get("value")
+    if not name or value is None:
+        return None
+
+    cookie: dict[str, Any] = {"name": name, "value": str(value)}
+
+    domain = raw.get("domain")
+    if domain:
+        cookie["domain"] = domain
+    cookie["path"] = raw.get("path") or "/"
+
+    # Cookie-Editor uses expirationDate; Playwright wants expires (int seconds).
+    exp = raw.get("expires")
+    if exp is None:
+        exp = raw.get("expirationDate")
+    if exp is not None:
+        try:
+            cookie["expires"] = int(float(exp))
+        except (TypeError, ValueError):
+            pass
+
+    if "httpOnly" in raw:
+        cookie["httpOnly"] = bool(raw["httpOnly"])
+    if "secure" in raw:
+        cookie["secure"] = bool(raw["secure"])
+
+    same_site = raw.get("sameSite")
+    if same_site:
+        mapped = _SAME_SITE_MAP.get(str(same_site).strip().lower())
+        if mapped:
+            cookie["sameSite"] = mapped
+
+    # sameSite=None requires secure=true per spec; many exporters forget this.
+    if cookie.get("sameSite") == "None":
+        cookie["secure"] = True
+
+    # Drop anything else — Playwright rejects unknown keys.
+    return {k: v for k, v in cookie.items() if k in _PLAYWRIGHT_ALLOWED_KEYS}
+
+
+def _normalize_cookies(items: Iterable[Any]) -> List[dict]:
+    normalized: List[dict] = []
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        converted = _normalize_cookie(raw)
+        if converted:
+            normalized.append(converted)
+    return normalized
+
+
+def _unwrap_cookie_payload(data: Any) -> list:
+    """Accept either a raw list or a ``{"cookies": [...]}`` wrapper."""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        maybe = data.get("cookies")
+        if isinstance(maybe, list):
+            return maybe
+    return []
+
+
 # ── 로드 ──────────────────────────────────────────────────────────────────────
 
 def load_session() -> list[dict]:
-    """저장된 쿠키 목록을 반환. 환경변수 우선, 없으면 파일에서 로드."""
-    cookies = _load_from_env() or _load_from_file()
+    """저장된 쿠키 목록을 반환. 환경변수 우선, 없으면 파일에서 로드.
+
+    Returned cookies are always in Playwright-ready shape (name/value/domain/
+    path/expires/httpOnly/secure/sameSite), normalized from whatever format
+    the source supplied.
+    """
+    cookies_env = _load_from_env()
+    cookies_file = None if cookies_env else _load_from_file()
+    cookies = cookies_env or cookies_file
     if not cookies:
         raise A2AError(
-            "세션 없음. `make login-a2a` 실행 후 "
-            f"출력된 CLAUDE_A2A_COOKIES 값을 환경변수에 설정하세요."
+            "세션 없음. 로컬에서 scripts/login_a2a.py를 실행하거나, Chrome 확장으로 "
+            "claude.ai 쿠키를 내보내 base64로 인코딩한 뒤 CLAUDE_A2A_COOKIES 환경변수에 "
+            "설정하세요."
         )
-    logger.info("세션 로드 완료 (%d개 쿠키, 출처=%s)", len(cookies),
-                "env" if _load_from_env() else "file")
+    source = "env" if cookies_env else "file"
+    logger.info("세션 로드 완료 (%d개 쿠키, 출처=%s)", len(cookies), source)
     return cookies
 
 
@@ -48,11 +148,11 @@ def _load_from_env() -> list[dict] | None:
     try:
         decoded = base64.b64decode(raw).decode("utf-8")
         data = json.loads(decoded)
-        cookies: list[dict] = data if isinstance(data, list) else data.get("cookies", [])
-        return cookies or None
     except Exception as e:
         logger.warning("환경변수 %s 파싱 실패: %s", _ENV_KEY, e)
         return None
+    cookies = _normalize_cookies(_unwrap_cookie_payload(data))
+    return cookies or None
 
 
 def _load_from_file() -> list[dict] | None:
@@ -60,11 +160,11 @@ def _load_from_file() -> list[dict] | None:
         return None
     try:
         data = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
-        cookies: list[dict] = data.get("cookies", [])
-        return cookies or None
     except Exception as e:
         logger.warning("세션 파일 파싱 실패: %s", e)
         return None
+    cookies = _normalize_cookies(_unwrap_cookie_payload(data))
+    return cookies or None
 
 
 def session_exists() -> bool:
