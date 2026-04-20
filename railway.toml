@@ -3,7 +3,7 @@ builder = "dockerfile"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-healthcheckPath = "/health"
-healthcheckTimeout = 300
+# Hermes gateway runs in Socket Mode — no HTTP listener, so no /health endpoint.
+# Rely on TCP/restart monitoring instead of application healthcheck.
 restartPolicyType = "on_failure"
 numReplicas = 1
